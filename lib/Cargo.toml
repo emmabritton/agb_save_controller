@@ -1,5 +1,5 @@
 [package]
-name = "game"
+name = "agb_save_controller"
 version.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -7,4 +7,4 @@ edition.workspace = true
 
 [dependencies]
 agb.workspace = true
-resources = { path = "../resources" }
+thiserror.workspace = true

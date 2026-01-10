@@ -1,5 +1,5 @@
 [package]
-name = "resources"
+name = "test_game"
 version.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -7,3 +7,4 @@ edition.workspace = true
 
 [dependencies]
 agb.workspace = true
+agb_save_controller = {path="../lib"}

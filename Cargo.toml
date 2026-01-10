@@ -1,24 +1,25 @@
 [workspace]
 resolver = "2"
 members = [
-    "resources",
-    "game"
+    "test_game",
+    "lib"
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-authors = ["??? <???>"]
-description = "???"
+authors = ["Emma Britton <emmabritton@pm.me>"]
+description = "Multislot save controller for AGB"
 license-file = "LICENSE"
-repository = "https://github.com/emmabritton/?"
+repository = "https://github.com/emmabritton/agb_save_controller"
 readme = "README.md"
-keywords = ["games", "pixels", "retro", "gba"]
+keywords = ["games", "pixels", "retro", "gba", "agb"]
 categories = ["games"]
-publish = false
+publish = true
 
 [workspace.dependencies]
 agb = "0.22.6"
+thiserror = { version = "2.0.17", default-features = false }
 
 [profile.dev]
 opt-level = 3
