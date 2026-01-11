@@ -69,15 +69,17 @@ extern crate alloc;
 
 use crate::SaveError::HardwareError;
 use crate::SlotId::Slot1;
+use crate::header::{HEADER_LEN, SlotHeader};
+use crate::internal::{Layout, SlotId};
 use SlotId::Slot2;
-use agb::{println, save};
 use agb::save::SaveManager;
+use agb::{println, save};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use core::num::NonZeroU8;
+use core::ops::Range;
 use thiserror::Error;
-use crate::header::{SlotHeader, HEADER_LEN};
-use crate::internal::{Layout, SlotId};
 
 #[derive(Debug, Clone, Error)]
 pub enum SaveError {
@@ -136,21 +138,22 @@ pub struct SaveSlotController<T: GbaSave> {
     next_slot: SlotId,
     next_gen: u32,
     layout: Layout,
-    _save_format: PhantomData<T>
+    _save_format: PhantomData<T>,
 }
 
 impl<T: GbaSave> SaveSlotController<T> {
-    pub fn new(save_manager: &mut SaveManager,
-               expected_version: u8) -> Result<Self, SaveError> {
+    pub fn new(save_manager: &mut SaveManager, expected_version: u8) -> Result<Self, SaveError> {
         SaveSlotController::new_with_offset(save_manager, expected_version, 0)
     }
 
     /// Write saves starting at offset (rounded to next sector size)
     /// If you want to store extra data in additional to these saves, pass it's size in min_offset and save at addr 0
-    pub fn new_with_min_offset(save_manager: &mut SaveManager,
-                               expected_version: u8,
-                               min_offset: usize) -> Result<Self, SaveError> {
-        let sector_size =  save_manager.access().map_err(HardwareError)?.sector_size();
+    pub fn new_with_min_offset(
+        save_manager: &mut SaveManager,
+        expected_version: u8,
+        min_offset: usize,
+    ) -> Result<Self, SaveError> {
+        let sector_size = save_manager.access().map_err(HardwareError)?.sector_size();
         let offset = if sector_size == 0 {
             min_offset
         } else {
@@ -325,11 +328,19 @@ impl<T: GbaSave> SaveSlotController<T> {
         let mut accessor = save_manager.access().map_err(HardwareError)?;
         let mut writer = accessor.prepare_write(start..end).map_err(HardwareError)?;
 
-        writer.write(start, &[0xFF]).map_err(HardwareError)?;
-
-        let slot2_off = self.layout.slot2_addr + start;
-        writer.write(slot2_off, &[0xFF]).map_err(HardwareError)?;
+        //set first byte of magic num to xFF making it invalid
+        writer.write(self.layout.slot1_addr, &[0xFF]).map_err(HardwareError)?;
+        writer.write(self.layout.slot2_addr, &[0xFF]).map_err(HardwareError)?;
         Ok(())
+    }
+
+    pub fn byte_range(&self) -> Range<usize> {
+        self.layout.slot1_addr..(self.layout.slot2_addr + self.layout.slot_bytes)
+    }
+
+    pub fn byte_range_aligned(&self, save_manager: &mut SaveManager) -> Result<Range<usize>, SaveError> {
+        let range = self.byte_range();
+        Ok(save_manager.access().map_err(HardwareError)?.align_range(range))
     }
 }
 
@@ -393,6 +404,13 @@ impl<T: GbaSave> SaveController<T> {
         self.data = None;
         self.controller.delete(save_manager)
     }
+
+
+    pub fn byte_range(&self) -> Range<usize> { self.controller.byte_range() }
+
+    pub fn byte_range_aligned(&self, save_manager: &mut SaveManager) -> Result<Range<usize>, SaveError> {
+        self.controller.byte_range_aligned(save_manager)
+    }
 }
 
 /// Convenience for [SaveController] that includes the [SaveManager]
@@ -441,6 +459,12 @@ impl<'gba, T: GbaSave> OwnedSaveController<'gba, T> {
     pub fn delete(&mut self) -> Result<(), SaveError> {
         self.controller.delete(self.manager)
     }
+
+    pub fn byte_range(&self) -> Range<usize> { self.controller.byte_range() }
+
+    pub fn byte_range_aligned(&mut self) -> Result<Range<usize>, SaveError> {
+        self.controller.byte_range_aligned(self.manager)
+    }
 }
 
 /// Multislot save controller
@@ -456,9 +480,10 @@ pub struct FileController<T: GbaSave> {
 impl<T: GbaSave> FileController<T> {
     pub fn new(
         save_manager: &mut SaveManager,
-        file_count: u8,
+        file_count: NonZeroU8,
         expected_version: u8,
     ) -> Result<Self, SaveError> {
+        let file_count = file_count.get();
         let (len, sector_size) = {
             let accessor = save_manager.access().map_err(HardwareError)?;
             (accessor.len(), accessor.sector_size())
@@ -493,18 +518,23 @@ impl<T: GbaSave> FileController<T> {
 }
 
 impl<T: GbaSave> FileController<T> {
-    pub fn save(
-        &mut self,
-        save_manager: &mut SaveManager,
-        file_idx: u8,
-        data: &T,
-    ) -> Result<(), SaveError> {
+    fn check_bounds(&self, file_idx: u8) -> Result<(), SaveError> {
         if file_idx >= self.file_count {
             return Err(SaveError::FileIndexOutsideRange {
                 index: file_idx,
                 max: self.file_count,
             });
         }
+        Ok(())
+    }
+
+    pub fn save(
+        &mut self,
+        save_manager: &mut SaveManager,
+        file_idx: u8,
+        data: &T,
+    ) -> Result<(), SaveError> {
+        self.check_bounds(file_idx)?;
 
         self.save_controllers[file_idx as usize].save(save_manager, data)
     }
@@ -514,14 +544,36 @@ impl<T: GbaSave> FileController<T> {
         save_manager: &mut SaveManager,
         file_idx: u8,
     ) -> Result<LoadResult<T>, SaveError> {
-        if file_idx >= self.file_count {
-            return Err(SaveError::FileIndexOutsideRange {
-                index: file_idx,
-                max: self.file_count,
-            });
-        }
+        self.check_bounds(file_idx)?;
 
         self.save_controllers[file_idx as usize].load(save_manager)
+    }
+
+    pub fn delete(
+        &mut self,
+        save_manager: &mut SaveManager,
+        file_idx: u8,
+    ) -> Result<(), SaveError> {
+        self.check_bounds(file_idx)?;
+
+        self.save_controllers[file_idx as usize].delete(save_manager)
+    }
+
+    pub fn byte_range(
+        &self,
+    ) -> Range<usize> {
+        let start = self.save_controllers.first().expect("no save controllers?").byte_range().start;
+        let end = self.save_controllers.last().expect("no save controllers?").byte_range().end;
+
+        start..end
+    }
+
+    pub fn byte_range_aligned(
+        &self,
+        save_manager: &mut SaveManager
+    ) -> Result<Range<usize>, SaveError> {
+        let range = self.byte_range();
+        Ok(save_manager.access().map_err(HardwareError)?.align_range(range))
     }
 }
 
@@ -537,7 +589,7 @@ impl<'gba, T: GbaSave> OwnedFileController<'gba, T> {
     /// Takes ownership of [SaveManager]
     pub fn new(
         save_manager: &'gba mut SaveManager,
-        file_count: u8,
+        file_count: NonZeroU8,
         expected_version: u8,
     ) -> Result<Self, SaveError> {
         let file_controller = FileController::new(save_manager, file_count, expected_version)?;
@@ -555,6 +607,21 @@ impl<'gba, T: GbaSave> OwnedFileController<'gba, T> {
 
     pub fn load(&mut self, file_idx: u8) -> Result<LoadResult<T>, SaveError> {
         self.file_controller.load(self.save_manager, file_idx)
+    }
+
+    pub fn delete(
+        &mut self,
+        file_idx: u8,
+    ) -> Result<(), SaveError> {
+        self.file_controller.delete(self.save_manager, file_idx)
+    }
+
+    pub fn byte_range(&self) -> Range<usize> {
+        self.file_controller.byte_range()
+    }
+
+    pub fn byte_range_aligned(&mut self) -> Result<Range<usize>, SaveError> {
+        self.file_controller.byte_range_aligned(self.save_manager)
     }
 }
 
@@ -601,4 +668,19 @@ fn read_header<T: GbaSave>(
     } else {
         Ok(None)
     }
+}
+
+/// Returns the size in bytes of a save region (two slots incl headers)
+///
+/// This is sector-aligned on flash media, and unaligned on byte-addressable media (sector_size==0).
+pub fn calc_save_size<T: GbaSave>(save_manager: &mut SaveManager) -> Result<usize, SaveError> {
+    let sector_size = save_manager.access().map_err(HardwareError)?.sector_size();
+
+    let slot_bytes = if sector_size == 0 {
+        T::SIZE + HEADER_LEN
+    } else {
+        round_up(T::SIZE + HEADER_LEN, sector_size)
+    };
+
+    Ok(slot_bytes * 2)
 }
